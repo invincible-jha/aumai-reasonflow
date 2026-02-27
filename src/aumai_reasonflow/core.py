@@ -250,12 +250,32 @@ class ChainVisualizer:
         """Truncate text to max_len with ellipsis if needed."""
         return text if len(text) <= max_len else text[: max_len - 3] + "..."
 
-    def _depth(self, step_id: str, chain: ReasoningChain) -> int:
-        """Compute the dependency depth of a step (0 = no dependencies)."""
+    def _depth(
+        self,
+        step_id: str,
+        chain: ReasoningChain,
+        visited: set[str] | None = None,
+    ) -> int:
+        """Compute the dependency depth of a step (0 = no dependencies).
+
+        Args:
+            step_id: The step whose depth to compute.
+            chain: The containing ReasoningChain.
+            visited: Set of step IDs already on the current recursion path,
+                used to break cycles and prevent infinite recursion.
+
+        Returns:
+            Integer depth; 0 means the step has no dependencies.
+        """
+        if visited is None:
+            visited = set()
+        if step_id in visited:
+            return 0
         step = chain.steps.get(step_id)
         if not step or not step.depends_on:
             return 0
-        return 1 + max(self._depth(dep, chain) for dep in step.depends_on)
+        visited = visited | {step_id}
+        return 1 + max(self._depth(dep, chain, visited) for dep in step.depends_on)
 
     def _topological_sort(self, chain: ReasoningChain) -> list[ReasoningStep]:
         """Return steps in topological (dependency-first) order."""
@@ -375,24 +395,37 @@ class FallacyDetector:
         )
 
     def _detect_cycles(self, chain: ReasoningChain) -> set[str]:
-        """Return the set of step IDs involved in dependency cycles."""
+        """Return the set of step IDs involved in dependency cycles.
+
+        When a back-edge to a GRAY ancestor is found, all nodes on the current
+        DFS path from that ancestor to the current node are added to the cyclic
+        set, not just the ancestor itself.
+        """
         WHITE, GRAY, BLACK = 0, 1, 2
         colors: dict[str, int] = {sid: WHITE for sid in chain.steps}
         cyclic: set[str] = set()
+        # path_stack tracks the current DFS path for cycle-member extraction
+        path_stack: list[str] = []
 
         def dfs(step_id: str) -> None:
             if step_id not in colors:
                 return
             if colors[step_id] == GRAY:
-                cyclic.add(step_id)
+                # Back-edge found: add all nodes in the cycle (from the ancestor
+                # to the current end of the path stack).
+                ancestor_index = path_stack.index(step_id)
+                for node_in_cycle in path_stack[ancestor_index:]:
+                    cyclic.add(node_in_cycle)
                 return
             if colors[step_id] == BLACK:
                 return
             colors[step_id] = GRAY
+            path_stack.append(step_id)
             step = chain.steps.get(step_id)
             if step:
                 for dep_id in step.depends_on:
                     dfs(dep_id)
+            path_stack.pop()
             colors[step_id] = BLACK
 
         for sid in chain.steps:
